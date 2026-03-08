@@ -350,6 +350,9 @@ class Wan21(BaseModel):
         The adapter is kept INACTIVE during training (no effect on training).
         It is only activated during sampling previews by BaseModel.generate_images(),
         allowing fast few-step generation (e.g., 8 steps, CFG 1) with a distilled LoRA.
+        
+        Supports hybrid adapters that contain both LoRA weights (lora_A/lora_B) and
+        direct weight/bias deltas (diff/diff_b) for layers like norms, embeddings, etc.
         """
         lora_path = self.model_config.inference_lora_path
         self.print_and_status_update(f"Loading inference LoRA from {lora_path}")
@@ -394,18 +397,34 @@ class Wan21(BaseModel):
             new_sd[new_key] = value
         lora_state_dict = new_sd
         
+        # Separate diff weights (direct weight/bias deltas) from LoRA weights.
+        # Distilled-step adapters often include diff/diff_b for norms, embeddings,
+        # biases, etc. that can't be expressed as LoRA decompositions.
+        diff_weights = {}
+        lora_weights = {}
+        for key, value in lora_state_dict.items():
+            if key.endswith('.diff') or key.endswith('.diff_b'):
+                diff_weights[key] = value
+            else:
+                lora_weights[key] = value
+        
+        if diff_weights:
+            self.print_and_status_update(
+                f"Found {len(diff_weights)} diff weight keys (norms, biases, embeddings, etc.)"
+            )
+        
         # Normalize lora_down/lora_up to lora_A/lora_B (peft format)
         # load_weights() expects peft format input when is_transformer=True
         new_sd = {}
-        for key, value in lora_state_dict.items():
+        for key, value in lora_weights.items():
             new_key = key.replace('.lora_down.', '.lora_A.')
             new_key = new_key.replace('.lora_up.', '.lora_B.')
             new_sd[new_key] = value
-        lora_state_dict = new_sd
+        lora_weights = new_sd
         
         # Auto-detect rank from the state dict
         rank_key = None
-        for key in lora_state_dict.keys():
+        for key in lora_weights.keys():
             if ".lora_A.weight" in key:
                 rank_key = key
                 break
@@ -414,14 +433,14 @@ class Wan21(BaseModel):
                 "Could not detect LoRA rank from state dict. "
                 "Expected keys containing '.lora_A.weight' or '.lora_down.weight'."
             )
-        dim = int(lora_state_dict[rank_key].shape[0])
+        dim = int(lora_weights[rank_key].shape[0])
         self.print_and_status_update(f"Detected LoRA rank: {dim}")
         
         network_config = {
             "type": "lora",
             "linear": dim,
             "linear_alpha": dim,
-            "transformer_only": True,
+            "transformer_only": False,
         }
         network_config = NetworkConfig(**network_config)
         
@@ -447,7 +466,7 @@ class Wan21(BaseModel):
         self.print_and_status_update("Loading inference LoRA weights")
         network.force_to(self.device_torch, dtype=self.torch_dtype)
         network._update_torch_multiplier()
-        network.load_weights(lora_state_dict)
+        network.load_weights(lora_weights)
         
         # Keep inactive during training — BaseModel.generate_images() will
         # activate this during sampling and deactivate it after
@@ -455,10 +474,99 @@ class Wan21(BaseModel):
         self.assistant_lora.is_active = False
         # Move to CPU to save VRAM during training
         self.assistant_lora.force_to('cpu', self.torch_dtype)
+        
+        # Store diff weights for applying during sampling
+        # These are direct weight/bias deltas applied to the transformer
+        self._inference_diff_weights = {}
+        if diff_weights:
+            for key, value in diff_weights.items():
+                # Convert key: "transformer.blocks.0.attn1.to_k.diff_b" 
+                # → module path "blocks.0.attn1.to_k", type "diff_b"
+                # Strip "transformer." prefix
+                module_key = key
+                if module_key.startswith("transformer."):
+                    module_key = module_key[len("transformer."):]
+                
+                self._inference_diff_weights[module_key] = value.to('cpu', dtype=self.torch_dtype)
+            
+            self.print_and_status_update(
+                f"Stored {len(self._inference_diff_weights)} diff weights for sampling"
+            )
+        
         self.print_and_status_update("Inference LoRA loaded (inactive until sampling)")
 
+    def _apply_diff_weights(self, transformer: WanTransformer3DModel):
+        """Apply diff/diff_b weight deltas to the transformer for sampling."""
+        if not hasattr(self, '_inference_diff_weights') or not self._inference_diff_weights:
+            return
+        
+        applied = 0
+        for key, delta in self._inference_diff_weights.items():
+            # key format: "blocks.0.attn1.to_k.diff_b" or "blocks.0.norm3.diff"
+            is_bias = key.endswith('.diff_b')
+            if is_bias:
+                module_path = key[:-len('.diff_b')]
+            else:
+                module_path = key[:-len('.diff')]
+            
+            # Navigate to the module
+            try:
+                module = transformer
+                for part in module_path.split('.'):
+                    if part.isdigit():
+                        module = module[int(part)]
+                    else:
+                        module = getattr(module, part)
+            except (AttributeError, IndexError, TypeError):
+                continue
+            
+            # Apply delta
+            delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+            if is_bias:
+                if module.bias is not None:
+                    module.bias.data.add_(delta_dev)
+                    applied += 1
+            else:
+                module.weight.data.add_(delta_dev)
+                applied += 1
+        
+        self.print_and_status_update(f"Applied {applied} diff weights to transformer")
 
-    
+    def _remove_diff_weights(self, transformer: WanTransformer3DModel):
+        """Remove diff/diff_b weight deltas from the transformer after sampling."""
+        if not hasattr(self, '_inference_diff_weights') or not self._inference_diff_weights:
+            return
+        
+        removed = 0
+        for key, delta in self._inference_diff_weights.items():
+            is_bias = key.endswith('.diff_b')
+            if is_bias:
+                module_path = key[:-len('.diff_b')]
+            else:
+                module_path = key[:-len('.diff')]
+            
+            try:
+                module = transformer
+                for part in module_path.split('.'):
+                    if part.isdigit():
+                        module = module[int(part)]
+                    else:
+                        module = getattr(module, part)
+            except (AttributeError, IndexError, TypeError):
+                continue
+            
+            delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+            if is_bias:
+                if module.bias is not None:
+                    module.bias.data.sub_(delta_dev)
+                    removed += 1
+            else:
+                module.weight.data.sub_(delta_dev)
+                removed += 1
+        
+        self.print_and_status_update(f"Removed {removed} diff weights from transformer")
+
+
     def load_wan_transformer(self, transformer_path, subfolder=None):
         self.print_and_status_update("Loading transformer")
         dtype = self.torch_dtype

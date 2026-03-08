@@ -388,6 +388,9 @@ class BaseModel:
             self.assistant_lora.is_active = True
             # move weights on to the device
             self.assistant_lora.force_to(self.device_torch, self.torch_dtype)
+            # apply diff weights if the model has them (e.g. distilled-step adapters)
+            if hasattr(self, '_apply_diff_weights'):
+                self._apply_diff_weights(self.unet)
 
         if network is not None:
             network = unwrap_model(self.network)
@@ -699,6 +702,9 @@ class BaseModel:
 
         if self.model_config.inference_lora_path is not None:
             print_acc("Unloading inference lora")
+            # remove diff weights if the model has them (e.g. distilled-step adapters)
+            if hasattr(self, '_remove_diff_weights'):
+                self._remove_diff_weights(self.unet)
             self.assistant_lora.is_active = False
             # move weights off the device
             self.assistant_lora.force_to('cpu', self.torch_dtype)
