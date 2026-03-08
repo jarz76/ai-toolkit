@@ -521,14 +521,16 @@ class Wan21(BaseModel):
                 continue
             
             # Apply delta
-            delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
             if is_bias:
-                if module.bias is not None:
+                if hasattr(module, 'bias') and module.bias is not None:
+                    delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
                     module.bias.data.add_(delta_dev)
                     applied += 1
             else:
-                module.weight.data.add_(delta_dev)
-                applied += 1
+                if hasattr(module, 'weight') and module.weight is not None:
+                    delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                    module.weight.data.add_(delta_dev)
+                    applied += 1
         
         self.print_and_status_update(f"Applied {applied} diff weights to transformer")
 
@@ -555,14 +557,16 @@ class Wan21(BaseModel):
             except (AttributeError, IndexError, TypeError):
                 continue
             
-            delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
             if is_bias:
-                if module.bias is not None:
+                if hasattr(module, 'bias') and module.bias is not None:
+                    delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
                     module.bias.data.sub_(delta_dev)
                     removed += 1
             else:
-                module.weight.data.sub_(delta_dev)
-                removed += 1
+                if hasattr(module, 'weight') and module.weight is not None:
+                    delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                    module.weight.data.sub_(delta_dev)
+                    removed += 1
         
         self.print_and_status_update(f"Removed {removed} diff weights from transformer")
 
