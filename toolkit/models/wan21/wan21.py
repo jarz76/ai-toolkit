@@ -2,10 +2,13 @@
 from functools import partial
 import torch
 import yaml
+import huggingface_hub
+from safetensors.torch import load_file
 from toolkit.accelerator import unwrap_model
 from toolkit.basic import flush
-from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from toolkit.config_modules import GenerateImageConfig, ModelConfig, NetworkConfig
 from toolkit.dequantize import patch_dequantization_on_save
+from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.memory_management.manager import MemoryManager
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
@@ -340,6 +343,121 @@ class Wan21(BaseModel):
     def get_train_scheduler():
         scheduler = CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
         return scheduler
+
+    def load_inference_adapter(self, transformer: WanTransformer3DModel):
+        """Load a distilled-step LoRA adapter for faster sampling.
+        
+        The adapter is kept INACTIVE during training (no effect on training).
+        It is only activated during sampling previews by BaseModel.generate_images(),
+        allowing fast few-step generation (e.g., 8 steps, CFG 1) with a distilled LoRA.
+        """
+        lora_path = self.model_config.inference_lora_path
+        self.print_and_status_update(f"Loading inference LoRA from {lora_path}")
+        
+        if not os.path.exists(lora_path):
+            # assume it is a hub path like "org/repo/filename.safetensors"
+            lora_splits = lora_path.split("/")
+            if len(lora_splits) != 3:
+                raise ValueError(
+                    f"Inference LoRA path {lora_path} is not a valid local path or hub path. "
+                    f"Hub paths should be in the format 'org/repo/filename.safetensors'"
+                )
+            repo_id = "/".join(lora_splits[:2])
+            filename = lora_splits[2]
+            try:
+                lora_path = huggingface_hub.hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                )
+                self.model_config.inference_lora_path = lora_path
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to download inference LoRA from {lora_path}: {e}"
+                )
+        
+        lora_state_dict = load_file(lora_path)
+        
+        # Convert keys to diffusers format if they are in original format
+        # ai-toolkit saves Wan 2.1 LoRAs with diffusion_model.* prefix and original
+        # attention names (self_attn, q, k, v, etc). convert_to_diffusers() converts
+        # these to diffusers format (transformer.*, attn1, to_q, to_k, to_v, etc)
+        if any(k.startswith("diffusion_model.") for k in lora_state_dict.keys()):
+            lora_state_dict = convert_to_diffusers(lora_state_dict)
+        
+        # Ensure keys have transformer. prefix for LoRASpecialNetwork
+        new_sd = {}
+        for key, value in lora_state_dict.items():
+            if not key.startswith("transformer."):
+                new_key = "transformer." + key
+            else:
+                new_key = key
+            new_sd[new_key] = value
+        lora_state_dict = new_sd
+        
+        # Normalize lora_down/lora_up to lora_A/lora_B (peft format)
+        # load_weights() expects peft format input when is_transformer=True
+        new_sd = {}
+        for key, value in lora_state_dict.items():
+            new_key = key.replace('.lora_down.', '.lora_A.')
+            new_key = new_key.replace('.lora_up.', '.lora_B.')
+            new_sd[new_key] = value
+        lora_state_dict = new_sd
+        
+        # Auto-detect rank from the state dict
+        rank_key = None
+        for key in lora_state_dict.keys():
+            if ".lora_A.weight" in key:
+                rank_key = key
+                break
+        if rank_key is None:
+            raise ValueError(
+                "Could not detect LoRA rank from state dict. "
+                "Expected keys containing '.lora_A.weight' or '.lora_down.weight'."
+            )
+        dim = int(lora_state_dict[rank_key].shape[0])
+        self.print_and_status_update(f"Detected LoRA rank: {dim}")
+        
+        network_config = {
+            "type": "lora",
+            "linear": dim,
+            "linear_alpha": dim,
+            "transformer_only": True,
+        }
+        network_config = NetworkConfig(**network_config)
+        
+        LoRASpecialNetwork.LORA_PREFIX_UNET = "lora_transformer"
+        network = LoRASpecialNetwork(
+            text_encoder=None,
+            unet=transformer,
+            lora_dim=network_config.linear,
+            multiplier=1.0,
+            alpha=network_config.linear_alpha,
+            train_unet=True,
+            train_text_encoder=False,
+            network_config=network_config,
+            network_type=network_config.type,
+            transformer_only=network_config.transformer_only,
+            is_transformer=True,
+            target_lin_modules=self.target_lora_modules,
+            is_assistant_adapter=True,
+            is_ara=True,
+        )
+        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
+        
+        self.print_and_status_update("Loading inference LoRA weights")
+        network.force_to(self.device_torch, dtype=self.torch_dtype)
+        network._update_torch_multiplier()
+        network.load_weights(lora_state_dict)
+        
+        # Keep inactive during training — BaseModel.generate_images() will
+        # activate this during sampling and deactivate it after
+        self.assistant_lora: LoRASpecialNetwork = network
+        self.assistant_lora.is_active = False
+        # Move to CPU to save VRAM during training
+        self.assistant_lora.force_to('cpu', self.torch_dtype)
+        self.print_and_status_update("Inference LoRA loaded (inactive until sampling)")
+
+
     
     def load_wan_transformer(self, transformer_path, subfolder=None):
         self.print_and_status_update("Loading transformer")
@@ -362,9 +480,13 @@ class Wan21(BaseModel):
             transformer.to(self.device_torch, dtype=dtype)
             flush()
 
-        if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
+        if self.model_config.inference_lora_path is not None:
+            self.load_inference_adapter(transformer)
+        elif self.model_config.assistant_lora_path is not None:
             raise ValueError(
-                "Assistant LoRA is not supported for Wan2.1 models currently")
+                "Assistant LoRA (merge for training) is not supported for Wan2.1 models currently. "
+                "Use inference_lora_path instead for sampling-only adapters."
+            )
 
         if self.model_config.lora_path is not None:
             raise ValueError(
