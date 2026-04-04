@@ -41,7 +41,7 @@ def get_optimizer(
         optimizer = Prodigy8bit(params, lr=use_lr, eps=1e-6, **optimizer_params)
     elif lower_type.startswith("prodigy_adv"):
         try:
-            from adv_optm import Prodigy as ProdigyAdv
+            from adv_optm import Prodigy_adv as ProdigyAdv
         except ImportError:
             raise ImportError("Please install adv_optm to use Prodigy_Adv optimizer -> pip install adv_optm")
 
