@@ -39,6 +39,19 @@ def get_optimizer(
         # let net be the neural network you want to train
         # you can choose weight decay value based on your problem, 0 by default
         optimizer = Prodigy8bit(params, lr=use_lr, eps=1e-6, **optimizer_params)
+	elif lower_type.startswith("prodigy_adv"):
+        try:
+            from adv_optm import Prodigy as ProdigyAdv
+        except ImportError:
+            raise ImportError("Please install adv_optm to use Prodigy_Adv optimizer -> pip install adv_optm")
+
+        print("Using Prodigy_Adv optimizer")
+        use_lr = learning_rate
+        if use_lr < 0.1:
+            use_lr = 1.0
+
+        print(f"Using lr {use_lr}")
+        optimizer = ProdigyAdv(params, lr=use_lr, eps=1e-6, **optimizer_params)
     elif lower_type.startswith("prodigy"):
         from prodigyopt import Prodigy
 
