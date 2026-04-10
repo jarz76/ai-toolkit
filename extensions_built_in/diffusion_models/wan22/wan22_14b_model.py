@@ -473,43 +473,89 @@ class Wan2214bModel(Wan21):
         self.assistant_lora = MultiAssistantLora(loaded_loras)
         self._all_inference_diff_weights = loaded_diff_weights
 
+    def _apply_diff_weights_to_single(self, target_transformer, diff_weights):
+        """Apply diff weights to a single WanTransformer3DModel."""
+        applied = 0
+        for key, delta in diff_weights.items():
+            is_bias = key.endswith('.diff_b')
+            if is_bias:
+                module_path = key[:-len('.diff_b')]
+            else:
+                module_path = key[:-len('.diff')]
+            
+            try:
+                module = target_transformer
+                for part in module_path.split('.'):
+                    if part.isdigit():
+                        module = module[int(part)]
+                    else:
+                        module = getattr(module, part)
+            except (AttributeError, IndexError, TypeError):
+                continue
+            
+            if is_bias:
+                if hasattr(module, 'bias') and module.bias is not None:
+                    delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
+                    module.bias.data.add_(delta_dev)
+                    applied += 1
+            else:
+                if hasattr(module, 'weight') and module.weight is not None:
+                    delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                    module.weight.data.add_(delta_dev)
+                    applied += 1
+        return applied
+
     def _apply_diff_weights(self, transformer: DualWanTransformer3DModel):
         if not hasattr(self, '_all_inference_diff_weights') or not self._all_inference_diff_weights:
             return
         
         applied = 0
         for target_name, diff_weights in self._all_inference_diff_weights:
-            target_transformer = getattr(transformer, target_name) if target_name else transformer
-            
-            for key, delta in diff_weights.items():
-                is_bias = key.endswith('.diff_b')
-                if is_bias:
-                    module_path = key[:-len('.diff_b')]
-                else:
-                    module_path = key[:-len('.diff')]
-                
-                try:
-                    module = target_transformer
-                    for part in module_path.split('.'):
-                        if part.isdigit():
-                            module = module[int(part)]
-                        else:
-                            module = getattr(module, part)
-                except (AttributeError, IndexError, TypeError):
-                    continue
-                
-                if is_bias:
-                    if hasattr(module, 'bias') and module.bias is not None:
-                        delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
-                        module.bias.data.add_(delta_dev)
-                        applied += 1
-                else:
-                    if hasattr(module, 'weight') and module.weight is not None:
-                        delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
-                        module.weight.data.add_(delta_dev)
-                        applied += 1
+            if target_name:
+                # Specific transformer target (transformer_1 or transformer_2)
+                target = getattr(transformer, target_name)
+                applied += self._apply_diff_weights_to_single(target, diff_weights)
+            else:
+                # Combined LoRA: apply to both transformers since the
+                # DualWanTransformer3DModel wrapper doesn't have the layer
+                # attributes (blocks, etc.) directly — they live inside
+                # transformer_1 and transformer_2.
+                applied += self._apply_diff_weights_to_single(transformer.transformer_1, diff_weights)
+                applied += self._apply_diff_weights_to_single(transformer.transformer_2, diff_weights)
         
         self.print_and_status_update(f"Applied {applied} diff weights to dual transformer")
+
+    def _remove_diff_weights_from_single(self, target_transformer, diff_weights):
+        """Remove diff weights from a single WanTransformer3DModel."""
+        removed = 0
+        for key, delta in diff_weights.items():
+            is_bias = key.endswith('.diff_b')
+            if is_bias:
+                module_path = key[:-len('.diff_b')]
+            else:
+                module_path = key[:-len('.diff')]
+            
+            try:
+                module = target_transformer
+                for part in module_path.split('.'):
+                    if part.isdigit():
+                        module = module[int(part)]
+                    else:
+                        module = getattr(module, part)
+            except (AttributeError, IndexError, TypeError):
+                continue
+            
+            if is_bias:
+                if hasattr(module, 'bias') and module.bias is not None:
+                    delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
+                    module.bias.data.sub_(delta_dev)
+                    removed += 1
+            else:
+                if hasattr(module, 'weight') and module.weight is not None:
+                    delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                    module.weight.data.sub_(delta_dev)
+                    removed += 1
+        return removed
 
     def _remove_diff_weights(self, transformer: DualWanTransformer3DModel):
         if not hasattr(self, '_all_inference_diff_weights') or not self._all_inference_diff_weights:
@@ -517,35 +563,14 @@ class Wan2214bModel(Wan21):
         
         removed = 0
         for target_name, diff_weights in self._all_inference_diff_weights:
-            target_transformer = getattr(transformer, target_name) if target_name else transformer
-            
-            for key, delta in diff_weights.items():
-                is_bias = key.endswith('.diff_b')
-                if is_bias:
-                    module_path = key[:-len('.diff_b')]
-                else:
-                    module_path = key[:-len('.diff')]
-                
-                try:
-                    module = target_transformer
-                    for part in module_path.split('.'):
-                        if part.isdigit():
-                            module = module[int(part)]
-                        else:
-                            module = getattr(module, part)
-                except (AttributeError, IndexError, TypeError):
-                    continue
-                
-                if is_bias:
-                    if hasattr(module, 'bias') and module.bias is not None:
-                        delta_dev = delta.to(module.bias.device, dtype=module.bias.dtype)
-                        module.bias.data.sub_(delta_dev)
-                        removed += 1
-                else:
-                    if hasattr(module, 'weight') and module.weight is not None:
-                        delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
-                        module.weight.data.sub_(delta_dev)
-                        removed += 1
+            if target_name:
+                # Specific transformer target
+                target = getattr(transformer, target_name)
+                removed += self._remove_diff_weights_from_single(target, diff_weights)
+            else:
+                # Combined LoRA: remove from both transformers
+                removed += self._remove_diff_weights_from_single(transformer.transformer_1, diff_weights)
+                removed += self._remove_diff_weights_from_single(transformer.transformer_2, diff_weights)
         
         self.print_and_status_update(f"Removed {removed} diff weights from dual transformer")
 
