@@ -239,6 +239,10 @@ class Wan2214bModel(Wan21):
             time_text_monkeypatch, self.model.transformer_2.condition_embedder
         )
 
+        # Offload the idle transformer to CPU if only training one stage.
+        # This saves ~28GB VRAM. It will be brought back to GPU for sampling.
+        self._offload_idle_transformer()
+
     def get_bucket_divisibility(self):
         # 8x compression  and 2x2 patch size
         return 16
@@ -395,6 +399,56 @@ class Wan2214bModel(Wan21):
         # pipeline = pipeline.to(self.device_torch)
 
         return pipeline
+
+    def _get_idle_transformer(self):
+        """Return the transformer NOT being trained, or None if training both."""
+        if self.train_high_noise and self.train_low_noise:
+            return None  # training both, nothing to offload
+        if self.train_high_noise and not self.train_low_noise:
+            return self.model.transformer_2
+        if self.train_low_noise and not self.train_high_noise:
+            return self.model.transformer_1
+        return None
+
+    def _offload_idle_transformer(self):
+        """Move the idle transformer to CPU to free VRAM during training."""
+        idle = self._get_idle_transformer()
+        if idle is not None and not str(idle.device).startswith('cpu'):
+            self.print_and_status_update(
+                "Offloading idle transformer to CPU to save VRAM"
+            )
+            idle.to('cpu')
+            flush()
+
+    def _reload_idle_transformer(self):
+        """Bring the idle transformer back to GPU for sampling."""
+        idle = self._get_idle_transformer()
+        if idle is not None and str(idle.device).startswith('cpu'):
+            self.print_and_status_update(
+                "Reloading idle transformer to GPU for sampling"
+            )
+            idle.to(self.device_torch)
+            flush()
+
+    @torch.no_grad()
+    def generate_images(
+        self,
+        image_configs: List[GenerateImageConfig],
+        sampler=None,
+        pipeline=None,
+    ):
+        # Bring idle transformer back to GPU — sampling uses both
+        self._reload_idle_transformer()
+        try:
+            result = super().generate_images(
+                image_configs=image_configs,
+                sampler=sampler,
+                pipeline=pipeline,
+            )
+        finally:
+            # Offload idle transformer back to CPU after sampling
+            self._offload_idle_transformer()
+        return result
 
     # static method to get the scheduler
     @staticmethod
