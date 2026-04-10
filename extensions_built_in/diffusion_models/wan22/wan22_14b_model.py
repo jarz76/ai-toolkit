@@ -251,7 +251,6 @@ class Wan2214bModel(Wan21):
 
         if (
             self.model_config.assistant_lora_path is not None
-            or self.model_config.inference_lora_path is not None
         ):
             raise ValueError(
                 "Assistant LoRA is not supported for Wan2.2 models currently"
@@ -399,6 +398,150 @@ class Wan2214bModel(Wan21):
     def get_train_scheduler():
         scheduler = CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
         return scheduler
+
+    def load_inference_adapter(self, transformer: DualWanTransformer3DModel):
+        lora_paths = self.model_config.inference_lora_path
+        
+        lora_dict = {}
+        if isinstance(lora_paths, dict):
+            lora_dict = lora_paths
+        elif isinstance(lora_paths, str):
+            if "_high_noise" in lora_paths:
+                lora_dict["high_noise"] = lora_paths
+                if os.path.exists(lora_paths.replace("_high_noise", "_low_noise")):
+                    lora_dict["low_noise"] = lora_paths.replace("_high_noise", "_low_noise")
+            elif "_low_noise" in lora_paths:
+                lora_dict["low_noise"] = lora_paths
+                if os.path.exists(lora_paths.replace("_low_noise", "_high_noise")):
+                    lora_dict["high_noise"] = lora_paths.replace("_low_noise", "_high_noise")
+            else:
+                lora_dict["combined"] = lora_paths
+        elif isinstance(lora_paths, list):
+            for path in lora_paths:
+                if "_high_noise" in path:
+                    lora_dict["high_noise"] = path
+                elif "_low_noise" in path:
+                    lora_dict["low_noise"] = path
+                else:
+                    lora_dict["combined"] = path
+
+        original_path = self.model_config.inference_lora_path
+        
+        loaded_loras = []
+        loaded_diff_weights = []
+        
+        if "high_noise" in lora_dict:
+            self.model_config.inference_lora_path = lora_dict["high_noise"]
+            super().load_inference_adapter(transformer.transformer_1)
+            loaded_loras.append(self.assistant_lora)
+            loaded_diff_weights.append(("transformer_1", getattr(self, "_inference_diff_weights", {})))
+            
+        if "low_noise" in lora_dict:
+            self.model_config.inference_lora_path = lora_dict["low_noise"]
+            super().load_inference_adapter(transformer.transformer_2)
+            loaded_loras.append(self.assistant_lora)
+            loaded_diff_weights.append(("transformer_2", getattr(self, "_inference_diff_weights", {})))
+            
+        if "combined" in lora_dict:
+            self.model_config.inference_lora_path = lora_dict["combined"]
+            super().load_inference_adapter(transformer)
+            loaded_loras.append(self.assistant_lora)
+            loaded_diff_weights.append(("", getattr(self, "_inference_diff_weights", {})))
+
+        self.model_config.inference_lora_path = original_path
+
+        class MultiAssistantLora:
+            def __init__(self, loras):
+                self.loras = loras
+
+            @property
+            def is_active(self):
+                return any(lora.is_active for lora in self.loras)
+
+            @is_active.setter
+            def is_active(self, value):
+                for lora in self.loras:
+                    lora.is_active = value
+
+            def force_to(self, device, dtype):
+                for lora in self.loras:
+                    lora.force_to(device, dtype)
+
+        self.assistant_lora = MultiAssistantLora(loaded_loras)
+        self._all_inference_diff_weights = loaded_diff_weights
+
+    def _apply_diff_weights(self, transformer: DualWanTransformer3DModel):
+        if not hasattr(self, '_all_inference_diff_weights') or not self._all_inference_diff_weights:
+            return
+        
+        applied = 0
+        for target_name, diff_weights in self._all_inference_diff_weights:
+            target_transformer = getattr(transformer, target_name) if target_name else transformer
+            
+            for key, delta in diff_weights.items():
+                is_bias = key.endswith('.diff_b')
+                if is_bias:
+                    module_path = key[:-len('.diff_b')]
+                else:
+                    module_path = key[:-len('.diff')]
+                
+                try:
+                    module = target_transformer
+                    for part in module_path.split('.'):
+                        if part.isdigit():
+                            module = module[int(part)]
+                        else:
+                            module = getattr(module, part)
+                except (AttributeError, IndexError, TypeError):
+                    continue
+                
+                delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                if is_bias:
+                    if module.bias is not None:
+                        module.bias.data.add_(delta_dev)
+                        applied += 1
+                else:
+                    module.weight.data.add_(delta_dev)
+                    applied += 1
+        
+        self.print_and_status_update(f"Applied {applied} diff weights to dual transformer")
+
+    def _remove_diff_weights(self, transformer: DualWanTransformer3DModel):
+        if not hasattr(self, '_all_inference_diff_weights') or not self._all_inference_diff_weights:
+            return
+        
+        removed = 0
+        for target_name, diff_weights in self._all_inference_diff_weights:
+            target_transformer = getattr(transformer, target_name) if target_name else transformer
+            
+            for key, delta in diff_weights.items():
+                is_bias = key.endswith('.diff_b')
+                if is_bias:
+                    module_path = key[:-len('.diff_b')]
+                else:
+                    module_path = key[:-len('.diff')]
+                
+                try:
+                    module = target_transformer
+                    for part in module_path.split('.'):
+                        if part.isdigit():
+                            module = module[int(part)]
+                        else:
+                            module = getattr(module, part)
+                except (AttributeError, IndexError, TypeError):
+                    continue
+                
+                delta_dev = delta.to(module.weight.device, dtype=module.weight.dtype)
+                if is_bias:
+                    if module.bias is not None:
+                        module.bias.data.sub_(delta_dev)
+                        removed += 1
+                else:
+                    module.weight.data.sub_(delta_dev)
+                    removed += 1
+        
+        self.print_and_status_update(f"Removed {removed} diff weights from dual transformer")
+
 
     def get_base_model_version(self):
         return "wan_2.2_14b"

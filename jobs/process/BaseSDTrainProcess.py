@@ -1598,7 +1598,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
             custom_pipeline=self.custom_pipeline,
             noise_scheduler=sampler,
         )
-        
+
+        if getattr(self.train_config, 'timestep_shift', None) is not None:
+            if hasattr(self.sd.noise_scheduler, 'config'):
+                import copy
+                new_config = copy.deepcopy(dict(self.sd.noise_scheduler.config))
+                new_config['shift'] = float(self.train_config.timestep_shift)
+                self.sd.noise_scheduler = self.sd.noise_scheduler.__class__(**new_config)
+                print_acc(f"Overridden trained noise scheduler timestep shift to: {self.train_config.timestep_shift}")
+                
+
         self.hook_after_sd_init_before_load()
         # run base sd process run
         self.sd.load_model()

@@ -408,6 +408,7 @@ class TrainConfig:
         # multiplier applied to loos on regularization images
         self.reg_weight = kwargs.get('reg_weight', 1.0)
         self.num_train_timesteps = kwargs.get('num_train_timesteps', 1000)
+        self.timestep_shift = kwargs.get('timestep_shift', None)
         # automatically adapte the vae scaling based on the image norm
         self.adaptive_scaling_factor = kwargs.get('adaptive_scaling_factor', False)
 
