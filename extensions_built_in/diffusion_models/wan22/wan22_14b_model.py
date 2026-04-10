@@ -127,6 +127,14 @@ class DualWanTransformer3DModel(torch.nn.Module):
             else:
                 t_name = "transformer_2"
 
+            # Safety: if the selected transformer is on CPU (offloaded because it's
+            # not being trained), force-select the other one. This handles edge cases
+            # where random timestep sampling (e.g. sigmoid) produces values outside
+            # the expected boundary range during training.
+            selected = getattr(self, t_name)
+            if str(selected.device).startswith('cpu'):
+                t_name = "transformer_2" if t_name == "transformer_1" else "transformer_1"
+
             # check if we are changing the active transformer, if so, we need to swap the one in
             # vram if low_vram is enabled
             # todo swap the loras as well

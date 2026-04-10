@@ -2021,6 +2021,11 @@ class SDTrainer(BaseSDTrainProcess):
                     print_acc("loss is nan")
                     loss = torch.zeros_like(loss).requires_grad_(True)
 
+                # check if loss has no grad_fn (detached tensor)
+                if not loss.requires_grad and loss.grad_fn is None:
+                    print_acc("WARNING: loss has no grad_fn, skipping backward for this step")
+                    loss = torch.zeros_like(loss).requires_grad_(True)
+
                 with self.timer('backward'):
                     # todo we have multiplier seperated. works for now as res are not in same batch, but need to change
                     loss = loss * loss_multiplier.mean()
