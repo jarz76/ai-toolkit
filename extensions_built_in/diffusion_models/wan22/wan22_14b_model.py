@@ -371,6 +371,9 @@ class Wan2214bModel(Wan21):
                 ignore_modules=[transformer_2.scale_shift_table] + [block.scale_shift_table for block in transformer_2.blocks]
             )
 
+        if self.model_config.inference_lora_path is not None:
+            self.load_inference_adapter(transformer)
+
         return transformer
 
     def get_generation_pipeline(self):
