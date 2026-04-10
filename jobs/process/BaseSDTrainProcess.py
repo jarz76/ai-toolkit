@@ -1601,7 +1601,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if getattr(self.train_config, 'timestep_shift', None) is not None:
             if hasattr(self.sd.noise_scheduler, 'config'):
-                import copy
                 new_config = copy.deepcopy(dict(self.sd.noise_scheduler.config))
                 new_config['shift'] = float(self.train_config.timestep_shift)
                 self.sd.noise_scheduler = self.sd.noise_scheduler.__class__(**new_config)
