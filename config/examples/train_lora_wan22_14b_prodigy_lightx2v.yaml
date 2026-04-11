@@ -96,8 +96,9 @@ config:
         model_kwargs:
           train_high_noise: false
           train_low_noise: true
-          boundary_ratio: 1
+          boundary_ratio: 0.875
           apply_boundary_to_sampling: false
+          sample_boundary_ratio: 1
       sample:
         sampler: "flowmatch"
         sample_every: 250
