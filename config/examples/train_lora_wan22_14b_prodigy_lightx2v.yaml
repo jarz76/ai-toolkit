@@ -1,0 +1,125 @@
+---
+job: "extension"
+config:
+  name: "wan22-prodigy-lightx2v"
+  process:
+    - type: "diffusion_trainer"
+      training_folder: "/root/ai-toolkit/output"
+      sqlite_db_path: "./aitk_db.db"
+      device: "cuda"
+      trigger_word: ""
+      performance_log_every: 10
+      log_dir: "output/tensorboard"
+      network:
+        type: "lora"
+        linear: 32
+        linear_alpha: 32
+        conv: 16
+        conv_alpha: 16
+        lokr_full_rank: true
+        lokr_factor: -1
+        network_kwargs:
+          ignore_if_contains: []
+      save:
+        dtype: "bf16"
+        save_every: 250
+        max_step_saves_to_keep: 4000
+        save_format: "diffusers"
+        push_to_hub: false
+      datasets:
+        - folder_path: "/root/ai-toolkit/datasets/"
+          mask_path: null
+          mask_min_value: 0.1
+          default_caption: ""
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          cache_latents_to_disk: false
+          is_reg: false
+          network_weight: 1
+          resolution:
+            - 512
+          controls: []
+          shrink_video_to_frames: true
+          num_frames: 1
+          flip_x: false
+          flip_y: false
+          num_repeats: 1
+      train:
+        batch_size: 2
+        bypass_guidance_embedding: false
+        steps: 3500
+        timestep_shift: 1
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: false
+        noise_scheduler: "flowmatch"
+        optimizer: "prodigy_adv"
+        timestep_type: "sigmoid"
+        content_or_style: "balanced"
+        optimizer_params:
+          weight_decay: 0.01
+          d_coef: 1
+          safeguard_warmup: true
+          betas:
+            - 0.9
+            - 0.99
+        unload_text_encoder: false
+        cache_text_embeddings: false
+        lr: 1
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+        skip_first_sample: false
+        force_first_sample: false
+        disable_sampling: false
+        dtype: "bf16"
+        diff_output_preservation: false
+        diff_output_preservation_multiplier: 1
+        diff_output_preservation_class: "person"
+        switch_boundary_every: 1
+        loss_type: "mse"
+      logging:
+        log_every: 1
+        use_ui_logger: true
+      model:
+        arch: "wan22_14b"
+        name_or_path: "ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16"
+        quantize: false
+        qtype: "qfloat8"
+        quantize_te: false
+        qtype_te: "qfloat8"
+        inference_lora_path:
+          high_noise: "lightx2v/Wan2.2-Distill-Loras/wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors"
+          low_noise: "lightx2v/Wan2.1-Distill-Loras/wan2.1_t2v_14b_lora_rank64_lightx2v_4step.safetensors"
+        low_vram: false
+        model_kwargs:
+          train_high_noise: false
+          train_low_noise: true
+          boundary_ratio: 1
+          apply_boundary_to_sampling: false
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        samples:
+          - prompt: "photo of woman, person, young korean woman looking at camera with dark hair and slight smile"
+            height: 1024
+            width: 768
+          - prompt: "photo of woman, person, young korean woman looking at camera with dark hair and wide smile showing her teeth, she has dark hair"
+            width: 768
+            height: 1024
+          - prompt: "photo of woman, person, young korean woman looking at camera sit on wooden chair wears crop tank top, half body photograph"
+            width: 768
+            height: 1024
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 1
+        sample_steps: 8
+        num_frames: 1
+        fps: 1
+meta:
+  name: "my_first_lora_v1"
+  version: "1.0"
