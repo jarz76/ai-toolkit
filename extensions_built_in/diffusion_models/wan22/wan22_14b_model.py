@@ -197,12 +197,23 @@ class Wan2214bModel(Wan21):
         self._wan_cache = None
 
         self.is_multistage = True
-        # multistage boundaries split the models up when sampling timesteps
-        # for wan 2.2 14b. the timesteps are 1000-875 for transformer 1 and 875-0 for transformer 2
-        self.multistage_boundaries: List[float] = [0.875, 0.0]
 
         self.train_high_noise = model_config.model_kwargs.get("train_high_noise", True)
         self.train_low_noise = model_config.model_kwargs.get("train_low_noise", True)
+
+        # Custom boundary_ratio: only applies when training low noise transformer only.
+        # This allows expanding transformer_2's timestep range (e.g., 1.0 for full 0-1000).
+        # Ignored when training both or high noise only (uses default 0.875).
+        custom_boundary = model_config.model_kwargs.get("boundary_ratio", None)
+        only_train_low_noise = self.train_low_noise and not self.train_high_noise
+        if custom_boundary is not None and only_train_low_noise:
+            self._boundary_ratio = float(custom_boundary)
+        else:
+            self._boundary_ratio = boundary_ratio_t2v
+
+        # multistage boundaries split the models up when sampling timesteps
+        # for wan 2.2 14b. the default timesteps are 1000-875 for transformer 1 and 875-0 for transformer 2
+        self.multistage_boundaries: List[float] = [self._boundary_ratio, 0.0]
 
         self.trainable_multistage_boundaries: List[int] = []
         if self.train_high_noise:
@@ -358,7 +369,7 @@ class Wan2214bModel(Wan21):
             transformer_2=transformer_2,
             torch_dtype=self.torch_dtype,
             device=self.device_torch,
-            boundary_ratio=boundary_ratio_t2v,
+            boundary_ratio=self._boundary_ratio,
             low_vram=self.model_config.low_vram,
         )
         
@@ -401,7 +412,7 @@ class Wan2214bModel(Wan21):
             device=self.device_torch,
             aggressive_offload=self.model_config.low_vram,
             # todo detect if it is i2v or t2v
-            boundary_ratio=boundary_ratio_t2v,
+            boundary_ratio=self._boundary_ratio,
         )
 
         # pipeline = pipeline.to(self.device_torch)
