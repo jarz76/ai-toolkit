@@ -211,6 +211,12 @@ class Wan2214bModel(Wan21):
         else:
             self._boundary_ratio = boundary_ratio_t2v
 
+        # Whether to apply the custom boundary_ratio during sampling previews.
+        # True (default): sampling uses boundary_ratio. False: sampling uses default 0.875.
+        self._apply_boundary_to_sampling = model_config.model_kwargs.get(
+            "apply_boundary_to_sampling", True
+        )
+
         # multistage boundaries split the models up when sampling timesteps
         # for wan 2.2 14b. the default timesteps are 1000-875 for transformer 1 and 875-0 for transformer 2
         self.multistage_boundaries: List[float] = [self._boundary_ratio, 0.0]
@@ -411,8 +417,8 @@ class Wan2214bModel(Wan21):
             expand_timesteps=self._wan_expand_timesteps,
             device=self.device_torch,
             aggressive_offload=self.model_config.low_vram,
-            # todo detect if it is i2v or t2v
-            boundary_ratio=self._boundary_ratio,
+            # Use custom boundary for sampling if enabled, otherwise default
+            boundary_ratio=self._boundary_ratio if self._apply_boundary_to_sampling else boundary_ratio_t2v,
         )
 
         # pipeline = pipeline.to(self.device_torch)
